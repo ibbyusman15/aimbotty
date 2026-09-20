@@ -266,7 +266,7 @@ local function cleanup()
  for _, tween in pairs(tweens) do tween:Cancel() end
  overlays:Destroy()
  if gui.Parent then gui:Destroy() end
+
+if typeof(script) == "Instance" then
+    connect(script.Destroying, cleanup)
 end
-connect(gui.Destroying, cleanup)
-connect(script.Destroying, cleanup)
-setEnabled(false)
