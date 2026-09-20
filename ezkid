@@ -1,0 +1,272 @@
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local UIS = game:GetService("UserInputService")
+local TweenService = game:GetService("TweenService")
+local player = Players.LocalPlayer
+local playerGui = player:WaitForChild("PlayerGui")
+
+local CONFIG = {
+ Hotkey = Enum.KeyCode.V,
+ MaxDistance = 500,
+ FieldOfView = 34,
+ Responsiveness = 18,
+ MaxTurnSpeed = 420,
+ Prediction = 0.05,
+ Deadzone = 0.16,
+ IgnoreTeammates = true,
+ RequireLineOfSight = true,
+ SwitchAdvantage = 3,
+ StickyLockTime = 0.35,
+ ScanInterval = 0.08,
+ ShowAimLine = true,
+ ShowLockRing = true,
+ ShowFovRing = false,
+}
+
+local oldGui = playerGui:FindFirstChild("AimbotArenaGui")
+if oldGui then oldGui:Destroy() end
+local binding = "AimbotArenaCamera"
+RunService:UnbindFromRenderStep(binding)
+
+local theme = {
+ Background = Color3.fromRGB(17, 22, 32),
+ Panel = Color3.fromRGB(28, 35, 48),
+ Text = Color3.fromRGB(238, 244, 252),
+ Muted = Color3.fromRGB(151, 165, 185),
+ Accent = Color3.fromRGB(79, 224, 178),
+}
+local function make(className, props, parent)
+ local obj = Instance.new(className)
+ for key, value in pairs(props) do obj[key] = value end
+ obj.Parent = parent
+ return obj
+end
+local function corner(obj, radius)
+ make("UICorner", {CornerRadius = UDim.new(0, radius)}, obj)
+end
+local function stroke(obj, color, transparency)
+ return make("UIStroke", {Color = color, Transparency = transparency or 0, Thickness = 1, ApplyStrokeMode = Enum.ApplyStrokeMode.Border}, obj)
+end
+local function label(parent, text, size, color, position, dimensions)
+ return make("TextLabel", {
+  BackgroundTransparency = 1, Text = text, TextSize = size,
+  Font = Enum.Font.GothamMedium, TextColor3 = color,
+  TextXAlignment = Enum.TextXAlignment.Left, Position = position,
+  Size = dimensions, BorderSizePixel = 0,
+ }, parent)
+end
+local gui = make("ScreenGui", {
+ Name = "AimbotArenaGui", ResetOnSpawn = false, IgnoreGuiInset = false,
+ DisplayOrder = 100, ZIndexBehavior = Enum.ZIndexBehavior.Sibling,
+}, playerGui)
+local overlays = make("ScreenGui", {
+ Name = "AimbotArenaOverlays", ResetOnSpawn = false, IgnoreGuiInset = true,
+ ScreenInsets = Enum.ScreenInsets.None, DisplayOrder = 99,
+ ZIndexBehavior = Enum.ZIndexBehavior.Sibling,
+}, playerGui)
+local card = make("TextButton", {
+ Name = "Toggle", Text = "", AutoButtonColor = false,
+ BackgroundColor3 = theme.Background, BorderSizePixel = 0,
+ Position = UDim2.fromOffset(16, 16), Size = UDim2.fromOffset(220, 62),
+ Selectable = true,
+}, gui)
+corner(card, 16)
+local edge = stroke(card, theme.Muted, 0.75)
+local icon = make("Frame", {
+ BackgroundColor3 = theme.Panel, BorderSizePixel = 0,
+ Position = UDim2.fromOffset(14, 14), Size = UDim2.fromOffset(34, 34),
+}, card)
+corner(icon, 10)
+local cross = label(icon, "+", 26, theme.Accent, UDim2.fromScale(0, 0), UDim2.fromScale(1, 1))
+cross.TextXAlignment = Enum.TextXAlignment.Center
+label(card, "ARENA", 13, theme.Text, UDim2.fromOffset(60, 13), UDim2.fromOffset(100, 18))
+local status = label(card, "OFF", 10, theme.Muted, UDim2.fromOffset(60, 34), UDim2.fromOffset(104, 14))
+local track = make("Frame", {
+ BackgroundColor3 = theme.Panel, BorderSizePixel = 0,
+ Position = UDim2.fromOffset(172, 21), Size = UDim2.fromOffset(34, 20),
+}, card)
+corner(track, 10)
+local knob = make("Frame", {
+ BackgroundColor3 = theme.Muted, BorderSizePixel = 0,
+ Position = UDim2.fromOffset(3, 3), Size = UDim2.fromOffset(14, 14),
+}, track)
+corner(knob, 7)
+local function overlay(name)
+ return make("Frame", {
+  Name = name, BackgroundTransparency = 1, BorderSizePixel = 0,
+  AnchorPoint = Vector2.new(0.5, 0.5), Visible = false,
+ }, overlays)
+end
+local lockRing = overlay("LockRing")
+corner(lockRing, 9)
+stroke(lockRing, theme.Accent, 0.12)
+local fovRing = overlay("FovRing")
+corner(fovRing, 9999)
+stroke(fovRing, theme.Accent, 0.75)
+local aimLine = overlay("AimLine")
+aimLine.BackgroundColor3 = theme.Accent
+aimLine.BackgroundTransparency = 0.55
+
+local connections = {}
+local tweens = {}
+local enabled = false
+local targetPlayer = nil
+local lockedAt = 0
+local nextScan = 0
+local disposed = false
+local function connect(signal, callback)
+ local connection = signal:Connect(callback)
+ table.insert(connections, connection)
+ return connection
+end
+local function animate(obj, properties)
+ if tweens[obj] then tweens[obj]:Cancel() end
+ local tween = TweenService:Create(obj, TweenInfo.new(0.18, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), properties)
+ tweens[obj] = tween
+ tween:Play()
+end
+local function hideOverlays()
+ lockRing.Visible = false
+ aimLine.Visible = false
+ fovRing.Visible = false
+end
+local function setEnabled(value)
+ enabled = value
+ targetPlayer = nil
+ nextScan = 0
+ status.Text = value and "SEARCHING" or "OFF"
+ status.TextColor3 = value and theme.Accent or theme.Muted
+ animate(knob, {Position = UDim2.fromOffset(value and 17 or 3, 3), BackgroundColor3 = value and theme.Accent or theme.Muted})
+ animate(edge, {Color = value and theme.Accent or theme.Muted, Transparency = value and 0.3 or 0.75})
+ if not value then hideOverlays() end
+end
+connect(card.Activated, function() setEnabled(not enabled) end)
+connect(UIS.InputBegan, function(input, processed)
+ if processed or UIS:GetFocusedTextBox() then return end
+ if input.KeyCode == CONFIG.Hotkey then setEnabled(not enabled) end
+end)
+
+local rayParams = RaycastParams.new()
+rayParams.FilterType = Enum.RaycastFilterType.Exclude
+local function evaluate(other, camera)
+ if not other or other == player or other.Parent ~= Players then return nil end
+ if CONFIG.IgnoreTeammates and not player.Neutral and not other.Neutral and player.Team ~= nil and player.Team == other.Team then return nil end
+ local character = other.Character
+ if not character then return nil end
+ local humanoid = character:FindFirstChildOfClass("Humanoid")
+ local head = character:FindFirstChild("Head")
+ if not humanoid or humanoid.Health <= 0 or not head or not head:IsA("BasePart") then return nil end
+ local origin = camera.CFrame.Position
+ local position = head.Position + head.AssemblyLinearVelocity * CONFIG.Prediction
+ local offset = position - origin
+ local distance = offset.Magnitude
+ if distance < 0.01 or distance > CONFIG.MaxDistance then return nil end
+ local angle = math.deg(math.acos(math.clamp(camera.CFrame.LookVector:Dot(offset.Unit), -1, 1)))
+ if angle > CONFIG.FieldOfView then return nil end
+ if CONFIG.RequireLineOfSight then
+  rayParams.FilterDescendantsInstances = player.Character and {player.Character} or {}
+  local result = workspace:Raycast(origin, head.Position - origin, rayParams)
+  if result and not result.Instance:IsDescendantOf(character) then return nil end
+ end
+ return {player = other, part = head, position = position, distance = distance, score = angle + distance / CONFIG.MaxDistance * 12}
+end
+
+local function draw(camera, target)
+ local viewport = camera.ViewportSize
+ local center = viewport * 0.5
+ fovRing.Visible = enabled and CONFIG.ShowFovRing
+ if fovRing.Visible then
+  local cf = camera.CFrame
+  local projected = camera:WorldToViewportPoint(cf.Position + cf.LookVector * 10 + cf.UpVector * 10)
+  local focal = math.abs(projected.Y - center.Y)
+  local radius = focal * math.tan(math.rad(math.clamp(CONFIG.FieldOfView, 1, 89)))
+  fovRing.Size = UDim2.fromOffset(radius * 2, radius * 2)
+  fovRing.Position = UDim2.fromOffset(center.X, center.Y)
+ end
+ lockRing.Visible = false
+ aimLine.Visible = false
+ if not target then return end
+ local point, visible = camera:WorldToViewportPoint(target.position)
+ if not visible or point.Z <= 0 then return end
+ local destination = Vector2.new(point.X, point.Y)
+ if CONFIG.ShowLockRing then
+  local headTop = camera:WorldToViewportPoint(target.position + camera.CFrame.UpVector * target.part.Size.Y * 0.7)
+  local size = math.clamp(math.abs(headTop.Y - point.Y) * 2, 18, 110)
+  lockRing.Size = UDim2.fromOffset(size, size)
+  lockRing.Position = UDim2.fromOffset(point.X, point.Y)
+  lockRing.Visible = true
+ end
+ if CONFIG.ShowAimLine then
+  local origin = card.AbsolutePosition + card.AbsoluteSize * Vector2.new(0.5, 1)
+  local delta = destination - origin
+  local midpoint = (origin + destination) * 0.5
+  aimLine.Size = UDim2.fromOffset(delta.Magnitude, 1)
+  aimLine.Position = UDim2.fromOffset(midpoint.X, midpoint.Y)
+  aimLine.Rotation = math.deg(math.atan2(delta.Y, delta.X))
+  aimLine.Visible = true
+ end
+end
+
+RunService:BindToRenderStep(binding, Enum.RenderPriority.Camera.Value + 10, function(dt)
+ if disposed or not enabled then return end
+ local camera = workspace.CurrentCamera
+ if not camera then hideOverlays() return end
+ local myHumanoid = player.Character and player.Character:FindFirstChildOfClass("Humanoid")
+ if not myHumanoid or myHumanoid.Health <= 0 then
+  targetPlayer = nil
+  status.Text = "WAITING"
+  hideOverlays()
+  return
+ end
+ local now = os.clock()
+ local target = evaluate(targetPlayer, camera)
+ if not target then targetPlayer = nil end
+ if now >= nextScan then
+  nextScan = now + CONFIG.ScanInterval
+  if not target or now - lockedAt >= CONFIG.StickyLockTime then
+   local best = target
+   for _, other in Players:GetPlayers() do
+    local candidate = evaluate(other, camera)
+    if candidate and (not best or candidate.score < best.score) then best = candidate end
+   end
+   if best and (not target or best.player ~= target.player and best.score + CONFIG.SwitchAdvantage < target.score) then
+    target = best
+    targetPlayer = best.player
+    lockedAt = now
+   end
+  end
+ end
+ status.Text = target and "LOCKED" or "SEARCHING"
+ if target then
+  local cf = camera.CFrame
+  local desired = (target.position - cf.Position).Unit
+  local angle = math.acos(math.clamp(cf.LookVector:Dot(desired), -1, 1))
+  if angle > math.rad(CONFIG.Deadzone) then
+   local step = math.min(math.max(dt, 0), 0.1)
+   local amount = math.min(1 - math.exp(-CONFIG.Responsiveness * step), math.rad(CONFIG.MaxTurnSpeed) * step / angle)
+   local axis = cf.LookVector:Cross(desired)
+   if axis.Magnitude > 0.000001 then
+    local rotation = CFrame.fromAxisAngle(axis.Unit, angle * amount)
+    camera.CFrame = CFrame.new(cf.Position) * rotation * cf.Rotation
+   end
+  end
+ end
+ draw(camera, target)
+end)
+connect(player.CharacterAdded, function()
+ targetPlayer = nil
+ nextScan = 0
+ hideOverlays()
+end)
+local function cleanup()
+ if disposed then return end
+ disposed = true
+ RunService:UnbindFromRenderStep(binding)
+ for _, connection in connections do connection:Disconnect() end
+ for _, tween in pairs(tweens) do tween:Cancel() end
+ overlays:Destroy()
+ if gui.Parent then gui:Destroy() end
+end
+connect(gui.Destroying, cleanup)
+connect(script.Destroying, cleanup)
+setEnabled(false)
